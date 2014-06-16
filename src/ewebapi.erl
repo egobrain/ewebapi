@@ -11,7 +11,6 @@
 %%   {verb, Name, Methods, Fun/3}.
 
 -export([
-         compile/1,
          init/3
         ]).
 
@@ -19,21 +18,33 @@
 -include("router.hrl").
 
 -type resource() :: #resource{}.
+-type methods() :: #methods{}.
 
--export_type([resource/0]).
+-export_type([
+              resource/0,
+              methods/0
+             ]).
+
+-record(state, {
+          resources,
+          cta,
+          ctp,
+          init_state
+         }).
 
 %% =============================================================================
 %%% Api
 %% =============================================================================
 
-compile(Routes) ->
-    ewebapi_utils:error_writer_map(fun compile_resource/1, Routes).
-
--spec init(Prefix, Version, Resources) -> #ewebapi_router{} when
+-spec init(Prefix, Version, Opts) -> #ewebapi_router{} when
       Prefix :: binary(),
       Version :: binary(),
+      Opts :: [Opt],
+      Opt :: {content_types_provided, [{binary(), any()}]} |
+             {content_types_accepted, [{binary(), any()}]} |
+             {resource, Resources},
       Resources :: [#resource{}].
-init(Prefix, Version, Resources) ->
+init(Prefix, Version, Opts) ->
     Size = byte_size(Prefix),
     Prefix0 =
         case Prefix of
@@ -41,18 +52,89 @@ init(Prefix, Version, Resources) ->
             _ -> Prefix
         end,
     Prefix2 = <<Prefix0/binary, $/, Version/binary>>,
-    PrefixList = ewebapi_utils:split_path(Prefix2),
-    #ewebapi_router{
-        prefix = PrefixList,
-        resources = Resources
-       }.
+    case ewebapi_http_utils:split_path(Prefix2) of
+        {ok, PrefixList} ->
+            case compile(Opts) of
+                {ok, Resources} ->
+                    Api =
+                        #ewebapi_router{
+                           prefix=PrefixList,
+                           resources=Resources
+                          },
+                    {ok, Api};
+                {error, _Reason} = Err ->
+                    Err
+            end;
+        {error, Reason} ->
+            {error, {prefix, Reason}}
+    end.
+
 
 %% =============================================================================
 %%% Internal logic
 %% =============================================================================
 
+compile(Opts) ->
+    ewebapi_utils:success_apply(
+      [
+       fun(S) -> fold_opts(Opts, S) end,
+       fun default_ct/1,
+       fun(#state{resources=Resources}) -> {ok, Resources} end
+      ], #state{}).
+
+fold_opts(Opts, State) ->
+    ewebapi_utils:error_writer_foldl(fun opts/2, State, Opts).
+
+default_ct(#state{cta=DCta, ctp=DCtp, resources=Resources}=State) ->
+    Resources2 =
+        traverse_resources_nodes(
+          Resources,
+          fun(#resource{cta=RCta, ctp=RCtp, is_id=IsId} = R, Parent) ->
+                  {PCta, PCtp} =
+                      case IsId =:= false orelse Parent =:= [] of
+                          true -> {undefined, undefined};
+                          false ->
+                              P = hd(Parent),
+                              P#resource.cta,
+                              P#resource.ctp
+                      end,
+                  R#resource{
+                    cta=ewebapi_utils:take_first_defined([RCta, PCta, DCta]),
+                    ctp=ewebapi_utils:take_first_defined([RCtp, PCtp, DCtp])
+                   }
+          end),
+    State2 = State#state{resources=Resources2},
+    {ok, State2}.
+
+opts({resources, Resources}, State) ->
+    case compile_resources(Resources) of
+        {ok, CompiledResources} ->
+            State2 = State#state{resources=CompiledResources},
+            {ok, State2};
+        {error, _Reason} = Err ->
+            Err
+    end;
+opts({content_types_accepted, Ctas}, State) ->
+    Ctas2 = [ewebapi_http_utils:normalize_content_type(Cta) || Cta <- Ctas],
+    State2 = State#state{cta=Ctas2},
+    {ok, State2};
+opts({content_types_provided, Ctps}, State) ->
+    Ctps2 = [ewebapi_http_utils:normalize_content_type(Ctp) || Ctp <- Ctps],
+    State2 = State#state{ctp=Ctps2},
+    {ok, State2};
+opts({init_state, InitState}, State) ->
+    State2 = State#state{init_state=InitState},
+    {ok, State2};
+opts({Opt, _Data}, _Api) ->
+    {error, {Opt, unknown}}.
+
+%% = Resource ==================================================================
+
+compile_resources(Routes) ->
+    ewebapi_utils:error_writer_map(fun compile_resource/1, Routes).
+
 compile_resource({resource, Name, Opts}) ->
-    case fold_opts(#resource{is_id=false}, Opts) of
+    case fold_resource_opts(#resource{is_id=false}, Opts) of
         {ok, Resource} ->
             {ok, {Name, Resource}};
         {error, Reason} ->
@@ -63,15 +145,16 @@ compile_resource(Opt) ->
 
 %% = Resource Opts =============================================================
 
-fold_opts(Resource, Opts)->
-    ewebapi_utils:error_writer_foldl(fun opt/2, Resource, Opts).
+fold_resource_opts(Resource, Opts)->
+    ewebapi_utils:error_writer_foldl(fun resource_opt/2, Resource, Opts).
 
-opt({resource, Name, Opts}, #resource{sub_resources=SubResources} = Resource) ->
-    case lists:keymeber(Name, 1, SubResources) of
+resource_opt({resource, Name, Opts},
+             #resource{sub_resources=SubResources}=Resource) ->
+    case lists:keymember(Name, 1, SubResources) of
         false ->
-            case fold_opts(#resource{is_id=false}, Opts) of
-                {ok, Resource} ->
-                    SubResources2 = [{Name, Resource}|SubResources],
+            case fold_resource_opts(#resource{is_id=false}, Opts) of
+                {ok, SubResource} ->
+                    SubResources2 = [{Name, SubResource}|SubResources],
                     Resource2 = Resource#resource{sub_resources=SubResources2},
                     {ok, Resource2};
                 {error, Reason} ->
@@ -80,7 +163,7 @@ opt({resource, Name, Opts}, #resource{sub_resources=SubResources} = Resource) ->
         true ->
             {error, {{resource, Name}, already_defineded}}
     end;
-opt({hop, Fun}, Resource)  ->
+resource_opt({hop, Fun}, Resource)  ->
     case is_function(Fun, idinc(2, Resource)) of
         true ->
             case Resource#resource.hop of
@@ -93,21 +176,21 @@ opt({hop, Fun}, Resource)  ->
         false ->
             {error, {hop, invalid_function}}
     end;
-opt({id, Opts}, #resource{is_id=false} = Resource) ->
-    case fold_opts(#resource{is_id=true}, Opts) of
+resource_opt({id, Opts}, #resource{is_id=false} = Resource) ->
+    case fold_resource_opts(#resource{is_id=true}, Opts) of
         {ok, IdResource} ->
             Resource2 = Resource#resource{id=IdResource},
             {ok, Resource2};
         {error, Reason} ->
             {error, {id, Reason}}
     end;
-opt({method, Method, Fun}, #resource{methods=Methods} = Resource) ->
+resource_opt({method, Method, Fun}, #resource{methods=Methods} = Resource) ->
     Clauses =
         [
          {<<"GET">>, idinc(2, Resource), #methods.get},
          {<<"PUT">>, idinc(3, Resource), #methods.put},
          {<<"POST">>, idinc(3, Resource), #methods.post},
-         {<<"DELETE">>, idinc(3, Resource), #methods.delete}
+         {<<"DELETE">>, idinc(2, Resource), #methods.delete}
         ],
     case apply_method(Method, Fun, Clauses, Methods) of
         {ok, Methods2} ->
@@ -116,7 +199,7 @@ opt({method, Method, Fun}, #resource{methods=Methods} = Resource) ->
         {error, Reason} ->
             {error, {{method, Method}, Reason}}
     end;
-opt({verb, Name, Method, Fun}, #resource{verbs=Verbs} = Resource) ->
+resource_opt({verb, Name, Method, Fun}, #resource{verbs=Verbs} = Resource) ->
     {VerbMethods, Verbs2} =
         case lists:keytake(Name, 1, Verbs) of
             {value, {_, M}, Vs} -> {M, Vs};
@@ -127,7 +210,7 @@ opt({verb, Name, Method, Fun}, #resource{verbs=Verbs} = Resource) ->
          {<<"GET">>, idinc(2, Resource), #methods.get},
          {<<"PUT">>, idinc(3, Resource), #methods.put},
          {<<"POST">>, idinc(3, Resource), #methods.post},
-         {<<"DELETE">>, idinc(3, Resource), #methods.delete}
+         {<<"DELETE">>, idinc(2, Resource), #methods.delete}
         ],
     case apply_method(Method, Fun, Clauses, VerbMethods) of
         {ok, VerbMethods2} ->
@@ -136,7 +219,15 @@ opt({verb, Name, Method, Fun}, #resource{verbs=Verbs} = Resource) ->
         {error, Reason} ->
             {error, {{method, Method}, Reason}}
     end;
-opt(Opt, _Resource) ->
+resource_opt({content_types_accepted, Ctas}, Resource) ->
+    Ctas2 = [ewebapi_http_utils:normalize_content_type(Cta) || Cta <- Ctas],
+    Resource2 = Resource#resource{cta=Ctas2},
+    {ok, Resource2};
+resource_opt({content_types_provided, Ctps}, Resource) ->
+    Ctps2 = [ewebapi_http_utils:normalize_content_type(Ctp) || Ctp <- Ctps],
+    Resource2 = Resource#resource{ctp=Ctps2},
+    {ok, Resource2};
+resource_opt(Opt, _Resource) ->
     {error, {{option, Opt}, unknown}}.
 
 %% =============================================================================
@@ -171,3 +262,14 @@ apply_method_(_M, _Fun, _Clause, _Resource) ->
 %% increment if resource is id resource
 idinc(A, #resource{is_id=true}) -> A+1;
 idinc(A, _Resource) -> A.
+
+traverse_resources_nodes(Rs, Fun) ->
+    traverse_resources_nodes(Rs, [], Fun).
+traverse_resources_nodes(Rs, Parent, Fun) ->
+    traverse_resources_nodes(Rs, Parent, Fun, []).
+traverse_resources_nodes([], _Parent, _Fun, Acc) ->
+    lists:reverse(Acc);
+traverse_resources_nodes([{Name, #resource{sub_resources=SubRs}=R}|Rest], Parent, Fun, Acc) ->
+    R2 = R#resource{sub_resources=traverse_resources_nodes(SubRs, [R|Parent], Fun)},
+    R3 = Fun(R2, Parent),
+    traverse_resources_nodes(Rest, Parent, Fun, [{Name, R3}|Acc]).

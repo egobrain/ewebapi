@@ -3,7 +3,9 @@
 -export([
          error_writer_foldl/3,
          error_writer_map/2,
-         split_path/1
+         success_apply/2,
+         success_foldl/3,
+         take_first_defined/1
         ]).
 
 -spec error_writer_foldl(Fun, State, List) -> {ok, NewState} | {error, Reasons} when
@@ -49,24 +51,37 @@ error_writer_map(Fun, List) when is_list(List) ->
         {error, _} = Err -> Err
     end.
 
--spec split_path(binary()) -> {ok, [binary()]} | {error, badrequest}.
-split_path(<< $/, Path/bits >>) ->
-    split_path(Path, []);
-split_path(_) ->
-    {error, badrequest}.
+-spec success_apply([Fun], State) -> {ok, State} | {error, Reason} when
+      Fun :: fun((State) -> {ok, State} | {error, Reason}).
+success_apply([], State) ->
+    {ok, State};
+success_apply([Fun|Rest], State) ->
+    case Fun(State) of
+        {ok, State2} ->
+            success_apply(Rest, State2);
+        {error, _Reason} = Err ->
+            Err
+    end.
 
-split_path(Path, Acc) ->
-    try
-        case binary:match(Path, <<"/">>) of
-            nomatch when Path =:= <<>> ->
-                {ok, lists:reverse([cowboy_http:urldecode(S) || S <- Acc])};
-            nomatch ->
-                {ok, lists:reverse([cowboy_http:urldecode(S) || S <- [Path|Acc]])};
-            {Pos, _} ->
-                << Segment:Pos/binary, _:8, Rest/bits >> = Path,
-                split_path(Rest, [Segment|Acc])
-        end
-    catch
-        error:badarg ->
-            {error, badrequest}
+-spec take_first_defined([undefined | Value]) -> Value | undefined.
+take_first_defined([]) ->
+    undefined;
+take_first_defined([Value|Rest]) ->
+    case Value of
+        undefined ->
+            take_first_defined(Rest);
+        _ ->
+            Value
+    end.
+
+-spec success_foldl(Fun, State, [E]) -> {ok, State} | {error, Reason} when
+      Fun :: fun((E, State) -> {ok, State} | {error, Reason}).
+success_foldl(_Fun, State, []) ->
+    {ok, State};
+success_foldl(Fun, State, [H|T]) ->
+    case Fun(H, State) of
+        {ok, State2} ->
+            success_foldl(Fun, State2, T);
+        {error, Reason} ->
+            {error, Reason}
     end.

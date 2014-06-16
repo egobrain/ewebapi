@@ -1,0 +1,19 @@
+%% -*- erlang -*-
+
+case os:getenv("TEST") of
+    false ->
+        CONFIG;
+    _ ->
+        TestDeps =
+            case lists:keyfind(test_deps, 1, CONFIG) of
+                {_, D} -> D;
+                false -> []
+            end,
+        case lists:keyfind(deps, 1, CONFIG) of
+            {_, Deps} ->
+                NDeps = TestDeps ++ Deps,
+                lists:keyreplace(deps, 1, CONFIG, {deps, NDeps});
+            false ->
+                [{deps, TestDeps}|CONFIG]
+        end
+end.

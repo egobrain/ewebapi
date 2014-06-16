@@ -6,5 +6,7 @@
           methods = #methods{},
           verbs = [],
           sub_resources = [],
+          ctp,
+          cta,
           hop
          }).
