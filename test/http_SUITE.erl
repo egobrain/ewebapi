@@ -13,7 +13,8 @@ groups() ->
     [
      {http, [],
       [
-       test_paths
+       test_paths,
+       test_verbs
       ]}
     ].
 
@@ -22,9 +23,16 @@ resources() ->
     R2 = resource(<<"r2">>),
     SR1 = resource(<<"sr1">>),
     SR2 = resource(<<"sr2">>),
+    VerbR =
+        {resource, <<"test_verbs">>,
+         [
+          {verb, M, M, tag(M, get_handler(M))}
+          || M <- ?METHODS
+         ]},
     [
      set(R1, SR1),
-     set(R2, SR2)
+     set(R2, SR2),
+     VerbR
     ].
 
 init_per_suite(Config) ->
@@ -92,7 +100,6 @@ test_paths(Config) ->
      || Test <-
             [
              fun(Tag, P, Env) ->
-                     ct:pal("~p = ~p", [{200, {Tag, <<"GET">>, Env}}, get(Config, P)]),
                      {200, {Tag, <<"GET">>, Env}} = get(Config, P)
              end,
              fun(Tag, P, Env) ->
@@ -117,6 +124,33 @@ test_paths(Config) ->
                      [<<"r2">>],
                      [<<"r2">>, <<"sr2">>]
                     ]
+            ]
+    ].
+
+test_verbs(Config) ->
+    Path = fun(M) -> path_from_list([<<"test_verbs">>, M]) end,
+    [
+     Test()
+     || Test <-
+            [
+             fun() ->
+                     M = <<"GET">>,
+                     {200, {M, M, []}} = get(Config, Path(M))
+             end,
+             fun() ->
+                     M = <<"PUT">>,
+                     Data = ?RAND_STRING,
+                     {200, {M, M, Data, Env}} = put(Config, Path(M), Data)
+             end,
+             fun() ->
+                     M = <<"POST">>,
+                     Data = ?RAND_STRING,
+                     {200, {M, M, Data, Env}} = post(Config, Path(M), Data)
+             end,
+             fun() ->
+                     M = <<"DELETE">>,
+                     {200, {M, M, Env}} = delete(Config, Path(M))
+             end
             ]
     ].
 
@@ -145,15 +179,19 @@ handle(Tag, Req, Id, Data, Env) ->
     {Method, Req2} = cowboy_req:method(Req),
     {ok, {Tag, Method, Id, Data, Env}, Req2}.
 
+get_handler(<<"GET">>) -> fun handle/3;
+get_handler(<<"PUT">>) -> fun handle/4;
+get_handler(<<"POST">>) -> fun handle/4;
+get_handler(<<"DELETE">>) -> fun handle/3.
 
 resource(Name) ->
     {resource, Name,
      [
-      {hop, fun(Req, Env) -> {ok, Req, [Name|Env]} end},
-      {method, <<"GET">>, tag(Name, fun handle/3)},
-      {method, <<"PUT">>, tag(Name, fun handle/4)},
-      {method, <<"POST">>, tag(Name, fun handle/4)},
-      {method, <<"DELETE">>, tag(Name, fun handle/3)}
+      {hop, fun(Req, Env) -> {ok, Req, [Name|Env]} end} |
+      [
+       {method, M, tag(Name, get_handler(M))}
+       || M <- ?METHODS
+      ]
      ]}.
 
 to_bert(Req, Data) ->
