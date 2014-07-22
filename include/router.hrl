@@ -2,5 +2,7 @@
           prefix :: [binary()],
           ctp,
           cta,
-          resources = [] :: [{binary(), ewebapi:resource()}]
+          resources = [] :: [{binary(), ewebapi:resource()}],
+          init_handler,
+          error_handler
          }).

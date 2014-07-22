@@ -13,7 +13,8 @@
           handler=undefined,
           cta=undefined,
           ctp=undefined,
-          env=[]
+          env=[],
+          api
          }).
 
 %% =============================================================================
@@ -23,17 +24,12 @@
 execute(Req, Env,
         #ewebapi_router{
            prefix=Prefix,
-           cta=Cta,
-           ctp=Ctp,
            resources=ResourcesProplist
-          }) ->
+          } = Api) ->
     {Path, Req2} = cowboy_req:path(Req),
     {ok, Path2} = ewebapi_http_utils:split_path(Path),
     Len = length(Prefix),
-    State = #state{
-               cta=Cta,
-               ctp=Ctp
-              },
+    State = #state{api = Api},
     case catch lists:split(Len, Path2) of
         {Prefix, RestPath} ->
             match(Req2, RestPath, ResourcesProplist, State);
@@ -51,7 +47,7 @@ match(Req, RestPath, ResourcesProplist, State) ->
             State2 = State#state{resources=Resources},
             choose_handler(Req, Methods, State2);
         {error, nomatch} ->
-            terminate_error(Req, 404, wrong_path, State)
+            default_error_handler(Req, 404, wrong_path, State)
     end.
 
 choose_handler(Req, Methods, State) ->
@@ -59,18 +55,24 @@ choose_handler(Req, Methods, State) ->
     case get_method_handler(Method, Methods) of
         {ok, Handler} ->
             State2 = State#state{handler=Handler},
-            content_types_provided(Req2, State2);
+            content_types_provided(Req2, State2, fun content_types_accepted/2);
         {error, undefined} ->
             AllowedMethods = methods_avaible(Methods),
             Req3 = cowboy_req:set_resp_header(<<"allow">>, AllowedMethods, Req2),
-            terminate_error(Req3, 405, method_not_avaible, State)
+            default_error_handler(Req3, 405, method_not_avaible, State)
     end.
 
-content_types_provided(Req, #state{resources=[#resource{ctp=Ctps}|_]}=State) ->
-    Next = fun content_types_accepted/2,
+content_types_provided(Req, #state{resources=[#resource{ctp=Ctps}|_]}=State,
+                       Next) ->
+    content_types_provided(Req, Ctps, State, Next);
+content_types_provided(Req, #state{api=#ewebapi_router{ctp=Ctps}}=State,
+                       Next) ->
+    content_types_provided(Req, Ctps, State, Next).
+
+content_types_provided(Req, Ctps, State, Next) ->
     case cowboy_req:parse_header(<<"accept">>, Req) of
         {error, badarg} ->
-            terminate_error(Req, 400, bad_accept_header, State);
+            flow_error(Req, 400, bad_accept_header, State);
         {ok, undefined, Req2} ->
             Ctp = hd(Ctps),
             State2 = State#state{ctp=Ctp},
@@ -86,7 +88,7 @@ choose_media_type(Req, Accept, Ctps, State, Next) ->
             State2 = State#state{ctp=Ctp},
             Next(Req, State2);
         {error, Reason} ->
-            terminate_error(Req, 406, Reason, State)
+            default_error_handler(Req, 406, Reason, State)
     end.
 
 content_types_accepted(Req, State) ->
@@ -101,7 +103,7 @@ content_types_accepted(Req, State) ->
         true ->
             content_types_accepted_(Req2, State);
         false ->
-            fold_hops(Req2, State, fun apply_handler/2)
+            init(Req2, State, fun apply_handler/2)
     end.
 
 content_types_accepted_(Req, #state{resources=[#resource{cta=Ctas}|_]}=State) ->
@@ -110,89 +112,162 @@ content_types_accepted_(Req, #state{resources=[#resource{cta=Ctas}|_]}=State) ->
             case ewebapi_http_utils:choose_content_type(ContentType, Ctas) of
                 {ok, Cta} ->
                     State2 = State#state{cta=Cta},
-                    fold_hops(Req2, State2, fun decode/2);
+                    init(Req2, State2, fun decode/2);
                 {error, Reason} ->
-                    io:format("ewebapi_http_utils:choose_content_type(~p, ~p).\n", [ContentType, Ctas]),
-                    terminate_error(Req2, 415, Reason, State)
+                    default_error_handler(Req2, 415, Reason, State)
             end;
         {error, badarg} ->
-            terminate_error(Req, 400, bad_content_type_header, State)
+            default_error_handler(Req, 400, bad_content_type_header, State)
     end.
 
-decode(Req, #state{cta={_Cta, Decode}}=State) ->
+decode(Req, #state{cta={_Cta, Decode}, resources=[Resource|_]}=State) ->
     case Decode(Req) of
         {ok, Result, Req2} ->
             apply_handler(Req2, Result, State);
+        {halt, _Req2} = Halt ->
+            Halt;
         {error, Reason, Req2} ->
-            terminate_error(Req2, 415, Reason, State)
+            resource_error_handler(Req2, 415, Reason, Resource, State)
+    end.
+
+init(Req, #state{api=#ewebapi_router{init_handler=InitHandler}}=State, Next) ->
+    case InitHandler(Req) of
+        {ok, Req2, Env} ->
+            State2 = State#state{env=Env},
+            fold_hops(Req2, State2, Next);
+        {halt, _Req2} = Halt ->
+            Halt;
+        {error, Reason, Req2} ->
+            default_error_handler(Req2, 500, Reason, State)
     end.
 
 fold_hops(Req, #state{resources=[_|Resources], env=Env}=State, Next) ->
+    fold_hops_(Resources, Req, Env, Next, State).
+fold_hops_([], Req, Env, Next, State) ->
+    State2 = State#state{env=Env},
+    Next(Req, State2);
+fold_hops_([#resource{hop=undefined}|Rest], Req, Env, Next, State) ->
+    fold_hops_(Rest, Req, Env, Next, State);
+fold_hops_([Resource|Rest], Req, Env, Next, State) ->
     Result =
-        ewebapi_utils:success_foldl(
-          fun(#resource{hop=undefined}, D) -> D;
-             (#resource{is_id=true, id=Id, hop=Hop}, {R, E}) ->
-                  handle_hop_result(Hop(R, Id, E));
-             (#resource{is_id=false, hop=Hop}, {R, E}) ->
-                  handle_hop_result(Hop(R, E))
-          end, {Req, Env}, Resources),
+        case Resource of
+            #resource{is_id=true, id=Id, hop=Hop} -> Hop(Req, Id, Env);
+            #resource{is_id=false, hop=Hop} -> Hop(Req, Env)
+        end,
     case Result of
-        {ok, {Req2, Env2}} ->
-            State2 = State#state{env=Env2},
-            Next(Req2, State2);
-        {error, {Reason, Req2}} ->
-            terminate_error(Req2, 400, Reason, State)
+        {ok, Req2, Env2} -> fold_hops_(Rest, Req2, Env2, Next, State);
+        {halt, _Req2} = Halt -> Halt;
+        {error, Reason, Req2} ->
+            State2 = State#state{env=Env},
+            resource_error_handler(Req2, 500, Reason, Resource, State2)
     end.
-
-handle_hop_result({ok, Req, Env}) -> {ok, {Req, Env}};
-handle_hop_result({error, Reason, Req}) -> {error, {Reason, Req}}.
 
 apply_handler(Req, Data,
               #state{
-                 resources=[#resource{id=Id, is_id=true}|_],
+                 resources=[Resource|_],
                  handler=Handle,
                  env=Env
                 } = State) ->
-    Result = Handle(Req, Id, Data, Env),
-    handle_result(Result, State);
-apply_handler(Req, Data, #state{handler=Handle, env=Env}=State) ->
-    Result = Handle(Req, Data, Env),
-    handle_result(Result, State).
+    Result =
+        case Resource of
+            #resource{id=Id, is_id=true} ->
+                Handle(Req, Id, Data, Env);
+            _ ->
+                Handle(Req, Data, Env)
+        end,
+    case Result of
+        {ok, Reply, Req2} ->
+            encode_reply(Req2, 200, Reply, State);
+        {halt, _Req2} = Halt ->
+            Halt;
+        {error, Reason, Req2} ->
+            resource_error_handler(Req2, 500, Reason, Resource, State)
+    end.
 
 apply_handler(Req,
               #state{
-                 resources=[#resource{id=Id, is_id=true}|_],
                  handler=Handle,
+                 resources=[Resource|_],
                  env=Env
                 } = State) ->
-    Result = Handle(Req, Id, Env),
-    handle_result(Result, State);
-apply_handler(Req, #state{handler=Handle, env=Env}=State) ->
-    Result = Handle(Req, Env),
-    handle_result(Result, State).
-
-handle_result({ok, Result, Req2}, State) ->
-    encode(Req2, Result, State);
-handle_result({error, Reason, Req2}, State) ->
-    terminate_error(Req2, 400, Reason, State).
-
-encode(Req, Data, #state{ctp={_Ctp, Encode}}=State) ->
-    case Encode(Req, Data) of
-        {ok, Req2} ->
-            finish(Req2, State);
+    Result =
+        case Resource of
+            #resource{id=Id, is_id=true} ->
+                Handle(Req, Id, Env);
+            _ ->
+                Handle(Req, Env)
+        end,
+    case Result of
+        {ok, Data, Req2} ->
+            encode_reply(Req2, 200, Data, State);
+        {halt, _Req2} = Halt ->
+            Halt;
         {error, Reason, Req2} ->
-            terminate_error(Req2, 416, Reason, State)
+            resource_error_handler(Req2, 400, Reason, Resource, State)
     end.
 
-finish(Req, _State) ->
-    {ok, Req2} = cowboy_req:reply(200, Req),
-    {halt, Req2}.
+encode_reply(Req, Code, Data, #state{ctp={Ctp, Encode}}=State) ->
+    BinCtp = ewebapi_http_utils:content_type_to_binary(Ctp),
+    Req2 = cowboy_req:set_resp_header(<<"content-type">>, BinCtp, Req),
+    case Encode(Req2, Data) of
+        {ok, EncodedData, Req3} ->
+            reply(Req3, Code, EncodedData, State);
+        {halt, _Req2} = Halt ->
+            Halt
+    end.
 
-terminate_error(Req, Code, Reason, _State) ->
-    %% TODO: implement error logic
-    Str = io_lib:format("~p\n", [Reason]),
-    {ok, Req2} = cowboy_req:reply(Code, [], Str, Req),
-    {error, Reason, Req2}.
+resource_error_handler(Req, Code, Reason,
+                       #resource{error_handler=ErrorHandler},
+                       State) when ErrorHandler =/= undefined ->
+    case ErrorHandler(Req, Code, Reason) of
+        {handled, Code2, Reason2, Req2} ->
+            terminate_error(Req2, Code2, Reason2, State);
+        {halt, _Req2} = Halt ->
+            Halt;
+        {unhandled, Req2} ->
+            default_error_handler(Req2, Code, Reason, State)
+    end.
+
+default_error_handler(
+  Req, Code, Reason,
+  #state{api=#ewebapi_router{error_handler=ErrorHandler}}=State) ->
+    case ErrorHandler(Req, Code, Reason) of
+        {handled, Code2, Reason2, Req2} ->
+            terminate_error(Req2, Code2, Reason2, State);
+        {halt, _Req2} = Halt ->
+            Halt;
+        {unhandled, Req2} ->
+            {ok, Req3} = cowboy_req:reply(Code, Req2),
+            {halt, Req3}
+    end.
+
+terminate_error(Req, Code, Reason, #state{ctp=undefined}=State) ->
+    Next =
+        fun(Req2, State2) ->
+                encode_reply(Req2, Code, Reason, State2)
+        end,
+    content_types_provided(Req, State, Next);
+terminate_error(Req, Code, Reason, State) ->
+    encode_reply(Req, Code, Reason, State).
+
+reply(Req, Code, EncodedData, _State) ->
+    Req2 =
+        case EncodedData of
+            {stream, StreamFun} ->
+                cowboy_req:set_resp_body_fun(StreamFun, Req);
+            {stream, Len, StreamFun} ->
+                cowboy_req:set_resp_body_fun(Len, StreamFun, Req);
+            {chunked, StreamFun} ->
+                cowboy_req:set_resp_body_fun(chunked, StreamFun, Req);
+            _Contents ->
+                cowboy_req:set_resp_body(EncodedData, Req)
+        end,
+    {ok, Req3} = cowboy_req:reply(Code, Req2),
+    {halt, Req3}.
+
+flow_error(Req, Code, _Reason, _State) ->
+    {ok, Req2} = cowboy_req:reply(Code, Req),
+    {halt, Req2}.
 
 %% =============================================================================
 %%% Internal functions
@@ -235,9 +310,9 @@ match_(#resource{
                             case IsId =:= false andalso
                                 IdResource =/= undefined of
                                 true ->
-                                    Resource2 = Resource#resource{id=Path},
-                                    match_(IdResource, Rest,
-                                           [Resource2|Acc]);
+                                    IdResource2 = IdResource#resource{id=Path},
+                                    match_(IdResource2, Rest,
+                                           [Resource|Acc]);
                                 false ->
                                     {error, nomatch}
                             end

@@ -8,5 +8,7 @@
           sub_resources = [],
           ctp,
           cta,
-          hop
+          hop,
+          init_handler,
+          error_handler
          }).

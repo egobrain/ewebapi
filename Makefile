@@ -11,7 +11,7 @@ clean:
 	@rm -Rf ebin .eunit log
 
 test: TEST=true
-test: deps compile
+test: build
 	@TEST=$(TEST) rebar ct skip_deps=true
 
 .PHONY: deps compile all test

@@ -14,7 +14,9 @@ groups() ->
      {http, [],
       [
        test_paths,
-       test_verbs
+       test_verbs,
+       error_handler,
+       id_handler
       ]}
     ].
 
@@ -29,10 +31,20 @@ resources() ->
           {verb, M, M, tag(M, get_handler(M))}
           || M <- ?METHODS
          ]},
+    ErrorR = error_resource(<<"error">>),
+    IdR = {resource, <<"id_resource">>,
+           [
+            {method, <<"GET">>, tag(<<"id_resource">>, fun handle/3)},
+            {id, [
+                  {method, <<"GET">>, tag(<<"id_resource">>, fun id_handle/4)}
+                 ]}
+           ]},
     [
      set(R1, SR1),
      set(R2, SR2),
-     VerbR
+     VerbR,
+     ErrorR,
+     IdR
     ].
 
 init_per_suite(Config) ->
@@ -61,11 +73,11 @@ init_per_group(http, Config) ->
     Resources = resources(),
     ContentTypesAccepted =
         [
-         {'*', fun cowboy_req:body/1}
+         {<<"application/bert">>, fun from_bert/1}
         ],
     ContentTypesProvided =
         [
-         {<<"*">>, fun to_bert/2}
+         {<<"application/bert">>, fun to_bert/2}
         ],
     {ok, ApiHandler} =
         ewebapi:init(
@@ -73,12 +85,13 @@ init_per_group(http, Config) ->
           [
            {content_types_accepted, ContentTypesAccepted},
            {content_types_provided, ContentTypesProvided},
-           {resources, Resources}
-           %% {init_state, []}
+           {resources, Resources},
+           {init_handler, fun init/1},
+           {error_handler, fun default_error_handler/3}
           ]),
     {ok, _} =
         cowboy:start_http(
-          http, 100, [{port, 0}],
+          http, 100, [{port, 9990}],
           [
            {middlewares, [ApiHandler]}
           ]),
@@ -154,6 +167,52 @@ test_verbs(Config) ->
             ]
     ].
 
+error_handler(Config) ->
+    WrongPath = path_from_list([<<"wrong_path">>]),
+
+    %% WrongPath
+    {404, {default_handled, wrong_path}} = get(Config, WrongPath),
+
+    ErrorPath = path_from_list([<<"error">>]),
+
+    %% WrongContentType Accepted
+    {response, fin, 405, _} =
+        simple_get(
+          Config,
+          ErrorPath,
+          [{<<"Accept">>, <<"application/json">>}]),
+
+    %% WrongContentType Provided
+    {response, fin, 406, _} =
+        simple_post(
+          Config,
+          ErrorPath,
+          [{<<"Accept">>, <<"application/json">>}],
+          <<"{\"data\":123}">>),
+
+    %% Custom handler
+    {403, {custom_handled, forbidden}} =
+        post(Config, ErrorPath,
+             {true, true, 403, forbidden}),
+
+    %% Default handler
+    {403, {default_handled, forbidden}} =
+        post(Config, ErrorPath,
+             {false, true, 403, forbidden}),
+
+    %% Unhandled
+    500 =
+        post(Config, ErrorPath,
+             {false, false, 403, forbidden}).
+
+id_handler(Config) ->
+    Path = path_from_list([<<"id_resource">>]),
+    {200, {<<"id_resource">>, <<"GET">>, []}} = get(Config, Path),
+
+    IdPath = path_from_list([<<"id_resource">>, <<"test_id">>]),
+    {200, {<<"id_resource">>, <<"GET">>, <<"test_id">>, []}} =
+        get(Config, IdPath).
+
 %% =============================================================================
 %%% Internal fucntions
 %% =============================================================================
@@ -171,11 +230,15 @@ handle(Tag, Req, Env) ->
     {Method, Req2} = cowboy_req:method(Req),
     {ok, {Tag, Method, Env}, Req2}.
 
+id_handle(Tag, Req, Id, Env) ->
+    {Method, Req2} = cowboy_req:method(Req),
+    {ok, {Tag, Method, Id, Env}, Req2}.
+
 handle(Tag, Req, Data, Env) ->
     {Method, Req2} = cowboy_req:method(Req),
     {ok, {Tag, Method, Data, Env}, Req2}.
 
-handle(Tag, Req, Id, Data, Env) ->
+id_handle(Tag, Req, Id, Data, Env) ->
     {Method, Req2} = cowboy_req:method(Req),
     {ok, {Tag, Method, Id, Data, Env}, Req2}.
 
@@ -194,15 +257,36 @@ resource(Name) ->
       ]
      ]}.
 
+error_resource(Name) ->
+    {resource, Name,
+     [
+      {method, <<"POST">>,
+       fun(Req, Reason, Env) ->
+               {error, Reason, Req}
+       end},
+       {error_handler,
+        fun (Req, _Code, {true, _DefaultHandle, Code, Reason}) ->
+                {handled, Code, {custom_handled, Reason}, Req};
+            (Req, _Code, _Reason) ->
+                {unhandled, Req}
+        end}
+      ]}.
+
 to_bert(Req, Data) ->
     Result = term_to_binary(Data),
-    Req2 = cowboy_req:set_resp_body(Result, Req),
-    {ok, Req2}.
+    {ok, Result, Req}.
 
-%% from_bert(Req) ->
-%%     {ok, Body, Req2} = cowboy_req:body(Req),
-%%     Result = binary_to_term(Body),
-%%     {ok, Result, Req2}.
+from_bert(Req) ->
+    {ok, Body, Req2} = cowboy_req:body(Req),
+    Result = binary_to_term(Body),
+    {ok, Result, Req2}.
+
+default_error_handler(Req, 404 = Code, wrong_path) ->
+    {handled, Code, {default_handled, wrong_path}, Req};
+default_error_handler(Req, _, {_CustomHandle, true, Code, Reason}) ->
+    {handled, Code, {default_handled, Reason}, Req};
+default_error_handler(Req, Code, Reason) ->
+    {unhandled, Req}.
 
 path_from_list(Path) ->
     Bin = << <<$/, P/binary>> || P <- Path >>,
@@ -236,30 +320,54 @@ config(Key, Config) ->
     {_, Value} = lists:keyfind(Key, 1, Config),
     Value.
 
+init(Req) ->
+    {ok, Req, []}.
+
+-define(HEADERS, [{<<"Content-Type">>, <<"application/bert">>}]).
+
 get(Config, Path) ->
     ConnPid = gun_open(Config),
-    Ref = gun:get(ConnPid, Path),
+    Ref = gun:get(ConnPid, Path, ?HEADERS),
     {response, nofin, Code, _Headers} = gun:await(ConnPid, Ref),
     {ok, Body} = gun:await_body(ConnPid, Ref),
     {Code, binary_to_term(Body)}.
 
 post(Config, Path, Data) ->
+    DataEncoded = term_to_binary(Data),
     ConnPid = gun_open(Config),
-    Ref = gun:post(ConnPid, Path, [], Data),
-    {response, nofin, Code, _Headers} = gun:await(ConnPid, Ref),
-    {ok, Body} = gun:await_body(ConnPid, Ref),
-    {Code, binary_to_term(Body)}.
+    Ref = gun:post(ConnPid, Path, ?HEADERS, DataEncoded),
+    {response, Fin, Code, _Headers} = gun:await(ConnPid, Ref),
+    case Fin of
+        nofin ->
+            {ok, Body} = gun:await_body(ConnPid, Ref),
+            {Code, binary_to_term(Body)};
+        fin ->
+            Code
+    end.
 
 put(Config, Path, Data) ->
+    DataEncoded = term_to_binary(Data),
     ConnPid = gun_open(Config),
-    Ref = gun:put(ConnPid, Path, [], Data),
+    Ref = gun:put(ConnPid, Path, ?HEADERS, DataEncoded),
     {response, nofin, Code, _Headers} = gun:await(ConnPid, Ref),
     {ok, Body} = gun:await_body(ConnPid, Ref),
     {Code, binary_to_term(Body)}.
 
 delete(Config, Path) ->
     ConnPid = gun_open(Config),
-    Ref = gun:delete(ConnPid, Path),
+    Ref = gun:delete(ConnPid, Path, ?HEADERS),
     {response, nofin, Code, _Headers} = gun:await(ConnPid, Ref),
     {ok, Body} = gun:await_body(ConnPid, Ref),
     {Code, binary_to_term(Body)}.
+
+%% === Simple Req helpers ======================================================
+
+simple_get(Config, Path, Headers) ->
+    ConnPid = gun_open(Config),
+    Ref = gun:get(ConnPid, Path, [Headers]),
+    gun:await(ConnPid, Ref).
+
+simple_post(Config, Path, Headers, Data) ->
+    ConnPid = gun_open(Config),
+    Ref = gun:post(ConnPid, Path, Headers, Data),
+    gun:await(ConnPid, Ref).

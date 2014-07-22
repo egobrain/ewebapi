@@ -29,7 +29,8 @@
           resources,
           cta,
           ctp,
-          init_state
+          init_handler,
+          error_handler
          }).
 
 %% =============================================================================
@@ -55,13 +56,9 @@ init(Prefix, Version, Opts) ->
     case ewebapi_http_utils:split_path(Prefix2) of
         {ok, PrefixList} ->
             case compile(Opts) of
-                {ok, Resources} ->
-                    Api =
-                        #ewebapi_router{
-                           prefix=PrefixList,
-                           resources=Resources
-                          },
-                    {ok, Api};
+                {ok, Api} ->
+                    Api2 = Api#ewebapi_router{prefix=PrefixList},
+                    {ok, Api2};
                 {error, _Reason} = Err ->
                     Err
             end;
@@ -78,8 +75,25 @@ compile(Opts) ->
     ewebapi_utils:success_apply(
       [
        fun(S) -> fold_opts(Opts, S) end,
+       fun valid_opts/1,
        fun default_ct/1,
-       fun(#state{resources=Resources}) -> {ok, Resources} end
+       fun(#state{
+              cta=Cta,
+              ctp=Ctp,
+              resources=Resources,
+              init_handler=InitHandler,
+              error_handler=ErrorHandler
+             }) ->
+               Api =
+                   #ewebapi_router{
+                      cta=Cta,
+                      ctp=Ctp,
+                      resources=Resources,
+                      init_handler=InitHandler,
+                      error_handler=ErrorHandler
+                     },
+               {ok, Api}
+       end
       ], #state{}).
 
 fold_opts(Opts, State) ->
@@ -95,8 +109,7 @@ default_ct(#state{cta=DCta, ctp=DCtp, resources=Resources}=State) ->
                           true -> {undefined, undefined};
                           false ->
                               P = hd(Parent),
-                              P#resource.cta,
-                              P#resource.ctp
+                              {P#resource.cta, P#resource.ctp}
                       end,
                   R#resource{
                     cta=ewebapi_utils:take_first_defined([RCta, PCta, DCta]),
@@ -122,11 +135,41 @@ opts({content_types_provided, Ctps}, State) ->
     Ctps2 = [ewebapi_http_utils:normalize_content_type(Ctp) || Ctp <- Ctps],
     State2 = State#state{ctp=Ctps2},
     {ok, State2};
-opts({init_state, InitState}, State) ->
-    State2 = State#state{init_state=InitState},
-    {ok, State2};
+opts({init_handler, Fun}, State) ->
+    case is_function(Fun, 1) of
+        true ->
+            State2 = State#state{init_handler=Fun},
+            {ok, State2};
+        false ->
+            {error, {init_handler, invalid_function}}
+    end;
+opts({error_handler, Fun}, State) ->
+    case is_function(Fun, 3) of
+        true ->
+            State2 = State#state{error_handler=Fun},
+            {ok, State2};
+        false ->
+            {error, {error_handler, invalid_function}}
+    end;
 opts({Opt, _Data}, _Api) ->
     {error, {Opt, unknown}}.
+
+%% = Opts validators ===========================================================
+
+valid_opts(State) ->
+    Validators =
+        [
+         fun init_required/1
+        ],
+    case ewebapi_utils:error_writer_test(Validators, State) of
+        ok ->
+            {ok, State};
+        {error, _Reasons} = Err ->
+            Err
+    end.
+
+init_required(#state{init_handler=undefined}) -> {error, {init_handler, required}};
+init_required(_) -> ok.
 
 %% = Resource ==================================================================
 
@@ -227,6 +270,22 @@ resource_opt({content_types_provided, Ctps}, Resource) ->
     Ctps2 = [ewebapi_http_utils:normalize_content_type(Ctp) || Ctp <- Ctps],
     Resource2 = Resource#resource{ctp=Ctps2},
     {ok, Resource2};
+resource_opt({init_handler, Fun}, Resource) ->
+    case is_function(Fun, idinc(1, Resource)) of
+        true ->
+            Resource2 = Resource#resource{init_handler=Fun},
+            {ok, Resource2};
+        false ->
+            {error, {init_handler, invalid_function}}
+    end;
+resource_opt({error_handler, Fun}, Resource) ->
+    case is_function(Fun, 3) of
+        true ->
+            Resource2 = Resource#resource{error_handler=Fun},
+            {ok, Resource2};
+        false ->
+            {error, {error_handler, invalid_function}}
+    end;
 resource_opt(Opt, _Resource) ->
     {error, {{option, Opt}, unknown}}.
 
@@ -265,11 +324,27 @@ idinc(A, _Resource) -> A.
 
 traverse_resources_nodes(Rs, Fun) ->
     traverse_resources_nodes(Rs, [], Fun).
+
 traverse_resources_nodes(Rs, Parent, Fun) ->
     traverse_resources_nodes(Rs, Parent, Fun, []).
+
 traverse_resources_nodes([], _Parent, _Fun, Acc) ->
     lists:reverse(Acc);
-traverse_resources_nodes([{Name, #resource{sub_resources=SubRs}=R}|Rest], Parent, Fun, Acc) ->
-    R2 = R#resource{sub_resources=traverse_resources_nodes(SubRs, [R|Parent], Fun)},
+traverse_resources_nodes(
+  [{Name, #resource{sub_resources=SubRs, id=IdResource}=R}|Rest],
+  Parent, Fun, Acc) ->
+    R1 =
+        case IdResource of
+            undefined -> R;
+            #resource{sub_resources=IdSubRs} ->
+                Parent2 = [R|Parent],
+                IdResource2 = Fun(IdResource, Parent2),
+                IdResource3 =
+                    IdResource2#resource{
+                      sub_resources=traverse_resources_nodes(IdSubRs, Parent2, Fun)
+                     },
+                R#resource{id=IdResource3}
+        end,
+    R2 = R1#resource{sub_resources=traverse_resources_nodes(SubRs, [R1|Parent], Fun)},
     R3 = Fun(R2, Parent),
     traverse_resources_nodes(Rest, Parent, Fun, [{Name, R3}|Acc]).

@@ -5,7 +5,8 @@
          normalize_content_type/1,
          prioritize_accept/1,
          choose_media_type/2,
-         choose_content_type/2
+         choose_content_type/2,
+         content_type_to_binary/1
         ]).
 
 -spec split_path(binary()) -> {ok, [binary()]} | {error, badrequest}.
@@ -33,6 +34,19 @@ normalize_content_type({ContentType, Callback})
     {cowboy_http:content_type(ContentType), Callback};
 normalize_content_type(Normalized) ->
     Normalized.
+
+content_type_to_binary({Type, SubType, Params}) ->
+    ParamsBin = content_type_params_to_iolist(Params, []),
+    iolist_to_binary([Type, <<"/">>, SubType, ParamsBin]).
+
+content_type_params_to_iolist('*', []) ->
+    <<>>;
+content_type_params_to_iolist([], []) ->
+    <<>>;
+content_type_params_to_iolist([], Acc) ->
+    lists:reverse(Acc);
+content_type_params_to_iolist([{Attr, Value}|Tail], Acc) ->
+    content_type_params_to_iolist(Tail, [[Attr, <<"=">>, Value], <<";">>|Acc]).
 
 prioritize_accept(Accept) ->
     lists:sort(
