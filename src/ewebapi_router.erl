@@ -45,6 +45,7 @@ match(Req, RestPath, ResourcesProplist, State) ->
     case match_(ResourcesProplist, RestPath) of
         {ok, {Methods, Resources}} ->
             State2 = State#state{resources=Resources},
+            ct:pal("Methods: ~p\nResources: ~p\n", [Methods, Resources]),
             choose_handler(Req, Methods, State2);
         {error, nomatch} ->
             default_error_handler(Req, 404, wrong_path, State)
