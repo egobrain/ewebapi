@@ -91,7 +91,7 @@ init_per_group(http, Config) ->
           ]),
     {ok, _} =
         cowboy:start_http(
-          http, 100, [{port, 9990}],
+          http, 100, [],
           [
            {middlewares, [ApiHandler]}
           ]),
