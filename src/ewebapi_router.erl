@@ -45,7 +45,6 @@ match(Req, RestPath, ResourcesProplist, State) ->
     case match_(ResourcesProplist, RestPath) of
         {ok, {Methods, Resources}} ->
             State2 = State#state{resources=Resources},
-            ct:pal("Methods: ~p\nResources: ~p\n", [Methods, Resources]),
             choose_handler(Req, Methods, State2);
         {error, nomatch} ->
             default_error_handler(Req, 404, wrong_path, State)
@@ -89,7 +88,8 @@ choose_media_type(Req, Accept, Ctps, State, Next) ->
             State2 = State#state{ctp=Ctp},
             Next(Req, State2);
         {error, Reason} ->
-            default_error_handler(Req, 406, Reason, State)
+            State2 = State#state{ctp=unreachable},
+            default_error_handler(Req, 406, Reason, State2)
     end.
 
 content_types_accepted(Req, State) ->
@@ -139,7 +139,7 @@ init(Req, #state{api=#ewebapi_router{init_handler=InitHandler}}=State, Next) ->
         {halt, _Req2} = Halt ->
             Halt;
         {error, Reason, Req2} ->
-            default_error_handler(Req2, 500, Reason, State)
+            default_error_handler(Req2, undefined, Reason, State)
     end.
 
 fold_hops(Req, #state{resources=[_|Resources], env=Env}=State, Next) ->
@@ -160,7 +160,7 @@ fold_hops_([Resource|Rest], Req, Env, Next, State) ->
         {halt, _Req2} = Halt -> Halt;
         {error, Reason, Req2} ->
             State2 = State#state{env=Env},
-            resource_error_handler(Req2, 500, Reason, Resource, State2)
+            resource_error_handler(Req2, undefined, Reason, Resource, State2)
     end.
 
 apply_handler(Req, Data,
@@ -182,7 +182,7 @@ apply_handler(Req, Data,
         {halt, _Req2} = Halt ->
             Halt;
         {error, Reason, Req2} ->
-            resource_error_handler(Req2, 500, Reason, Resource, State)
+            resource_error_handler(Req2, undefined, Reason, Resource, State)
     end.
 
 apply_handler(Req,
@@ -204,7 +204,7 @@ apply_handler(Req,
         {halt, _Req2} = Halt ->
             Halt;
         {error, Reason, Req2} ->
-            resource_error_handler(Req2, 400, Reason, Resource, State)
+            resource_error_handler(Req2, undefined, Reason, Resource, State)
     end.
 
 encode_reply(Req, Code, Data, #state{ctp={Ctp, Encode}}=State) ->
@@ -226,8 +226,12 @@ resource_error_handler(Req, Code, Reason,
         {halt, _Req2} = Halt ->
             Halt;
         {unhandled, Req2} ->
-            default_error_handler(Req2, Code, Reason, State)
-    end.
+            default_error_handler(Req2, Code, Reason, State);
+        {unhandled, Code2, Reason2, Req2} ->
+            default_error_handler(Req2, Code2, Reason2, State)
+    end;
+resource_error_handler(Req, Code, Reason, _Resources, State) ->
+    default_error_handler(Req, Code, Reason, State).
 
 default_error_handler(
   Req, Code, Reason,
@@ -242,6 +246,9 @@ default_error_handler(
             {halt, Req3}
     end.
 
+terminate_error(Req, Code, _Reason, #state{ctp=unreachable}) ->
+    {ok, Req2} = cowboy_req:reply(Code, Req),
+    {halt, Req2};
 terminate_error(Req, Code, Reason, #state{ctp=undefined}=State) ->
     Next =
         fun(Req2, State2) ->
@@ -252,6 +259,7 @@ terminate_error(Req, Code, Reason, State) ->
     encode_reply(Req, Code, Reason, State).
 
 reply(Req, Code, EncodedData, _State) ->
+    Code2 = case Code of undefined -> 500; _ -> Code end,
     Req2 =
         case EncodedData of
             {stream, StreamFun} ->
@@ -263,7 +271,7 @@ reply(Req, Code, EncodedData, _State) ->
             _Contents ->
                 cowboy_req:set_resp_body(EncodedData, Req)
         end,
-    {ok, Req3} = cowboy_req:reply(Code, Req2),
+    {ok, Req3} = cowboy_req:reply(Code2, Req2),
     {halt, Req3}.
 
 flow_error(Req, Code, _Reason, _State) ->
