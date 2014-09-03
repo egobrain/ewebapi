@@ -16,7 +16,8 @@ groups() ->
        test_paths,
        test_verbs,
        error_handler,
-       id_handler
+       id_handler,
+       test_custom_code
       ]}
     ].
 
@@ -39,12 +40,14 @@ resources() ->
                   {method, <<"GET">>, tag(<<"id_resource">>, fun id_handle/4)}
                  ]}
            ]},
+    CustomCodeR = custom_code_resource(<<"custom_code">>),
     [
      set(R1, SR1),
      set(R2, SR2),
      VerbR,
      ErrorR,
-     IdR
+     IdR,
+     CustomCodeR
     ].
 
 init_per_suite(Config) ->
@@ -153,16 +156,16 @@ test_verbs(Config) ->
              fun() ->
                      M = <<"PUT">>,
                      Data = ?RAND_STRING,
-                     {200, {M, M, Data, Env}} = put(Config, Path(M), Data)
+                     {200, {M, M, Data, _Env}} = put(Config, Path(M), Data)
              end,
              fun() ->
                      M = <<"POST">>,
                      Data = ?RAND_STRING,
-                     {200, {M, M, Data, Env}} = post(Config, Path(M), Data)
+                     {200, {M, M, Data, _Env}} = post(Config, Path(M), Data)
              end,
              fun() ->
                      M = <<"DELETE">>,
-                     {200, {M, M, Env}} = delete(Config, Path(M))
+                     {200, {M, M, _Env}} = delete(Config, Path(M))
              end
             ]
     ].
@@ -212,6 +215,24 @@ id_handler(Config) ->
     IdPath = path_from_list([<<"id_resource">>, <<"test_id">>]),
     {200, {<<"id_resource">>, <<"GET">>, <<"test_id">>, []}} =
         get(Config, IdPath).
+
+test_custom_code(Config) ->
+    Env = [],
+    Name = <<"custom_code">>,
+    Path = path_from_list([Name]),
+    {206, {<<"GET">>, Name, Env}} = get(Config, Path),
+    TestData = <<"test_data">>,
+    {206, {<<"POST">>, TestData, Name, Env}} = post(Config, Path, TestData),
+    {206, {<<"PUT">>, TestData, Name, Env}} = put(Config, Path, TestData),
+    {206, {<<"DELETE">>, Name, Env}} = delete(Config, Path),
+
+    Id = <<"id">>,
+    IdPath = path_from_list([Name, Id]),
+    {206, {<<"GET">>, Id, Name, Env}} = get(Config, IdPath),
+    TestData = <<"test_data">>,
+    {206, {<<"POST">>, Id, TestData, Name, Env}} = post(Config, IdPath, TestData),
+    {206, {<<"PUT">>, Id, TestData, Name, Env}} = put(Config, IdPath, TestData),
+    {206, {<<"DELETE">>, Id, Name, Env}} = delete(Config, IdPath).
 
 %% =============================================================================
 %%% Internal fucntions
@@ -271,6 +292,29 @@ error_resource(Name) ->
                 {unhandled, Req}
         end}
       ]}.
+custom_code_resource(Name) ->
+    {resource,Name,
+     [
+      {method, <<"GET">>,
+       fun(Req, Env) -> {ok, 206, {<<"GET">>, Name, Env}, Req} end},
+      {method, <<"POST">>,
+       fun(Req, Data, Env) -> {ok, 206, {<<"POST">>, Data, Name, Env}, Req} end},
+      {method, <<"PUT">>,
+       fun(Req, Data, Env) -> {ok, 206, {<<"PUT">>, Data, Name, Env}, Req} end},
+      {method, <<"DELETE">>,
+       fun(Req, Env) -> {ok, 206, {<<"DELETE">>, Name, Env}, Req} end},
+      {id,
+       [
+        {method, <<"GET">>,
+         fun(Req, Id, Env) -> {ok, 206, {<<"GET">>, Id, Name, Env}, Req} end},
+        {method, <<"POST">>,
+         fun(Req, Id, Data, Env) -> {ok, 206, {<<"POST">>, Id, Data, Name, Env}, Req} end},
+        {method, <<"PUT">>,
+         fun(Req, Id, Data, Env) -> {ok, 206, {<<"PUT">>, Id, Data, Name, Env}, Req} end},
+        {method, <<"DELETE">>,
+         fun(Req, Id, Env) -> {ok, 206, {<<"DELETE">>, Id, Name, Env}, Req} end}
+       ]}
+     ]}.
 
 to_bert(Req, Data) ->
     Result = term_to_binary(Data),
@@ -285,7 +329,7 @@ default_error_handler(Req, 404 = Code, wrong_path) ->
     {handled, Code, {default_handled, wrong_path}, Req};
 default_error_handler(Req, _, {_CustomHandle, true, Code, Reason}) ->
     {handled, Code, {default_handled, Reason}, Req};
-default_error_handler(Req, Code, Reason) ->
+default_error_handler(Req, _Code, _Reason) ->
     {unhandled, Req}.
 
 path_from_list(Path) ->
@@ -323,19 +367,23 @@ config(Key, Config) ->
 init(Req) ->
     {ok, Req, []}.
 
--define(HEADERS, [{<<"Content-Type">>, <<"application/bert">>}]).
+-define(DEFAULT_HEADERS, [{<<"Content-Type">>, <<"application/bert">>}]).
 
 get(Config, Path) ->
+    get(Config, ?DEFAULT_HEADERS, Path).
+get(Config, Headers, Path) ->
     ConnPid = gun_open(Config),
-    Ref = gun:get(ConnPid, Path, ?HEADERS),
+    Ref = gun:get(ConnPid, Path, Headers),
     {response, nofin, Code, _Headers} = gun:await(ConnPid, Ref),
     {ok, Body} = gun:await_body(ConnPid, Ref),
     {Code, binary_to_term(Body)}.
 
 post(Config, Path, Data) ->
+    post(Config, ?DEFAULT_HEADERS, Path, Data).
+post(Config, Headers, Path, Data) ->
     DataEncoded = term_to_binary(Data),
     ConnPid = gun_open(Config),
-    Ref = gun:post(ConnPid, Path, ?HEADERS, DataEncoded),
+    Ref = gun:post(ConnPid, Path, Headers, DataEncoded),
     {response, Fin, Code, _Headers} = gun:await(ConnPid, Ref),
     case Fin of
         nofin ->
@@ -346,16 +394,20 @@ post(Config, Path, Data) ->
     end.
 
 put(Config, Path, Data) ->
+    put(Config, ?DEFAULT_HEADERS, Path, Data).
+put(Config, Headers, Path, Data) ->
     DataEncoded = term_to_binary(Data),
     ConnPid = gun_open(Config),
-    Ref = gun:put(ConnPid, Path, ?HEADERS, DataEncoded),
+    Ref = gun:put(ConnPid, Path, Headers, DataEncoded),
     {response, nofin, Code, _Headers} = gun:await(ConnPid, Ref),
     {ok, Body} = gun:await_body(ConnPid, Ref),
     {Code, binary_to_term(Body)}.
 
 delete(Config, Path) ->
+    delete(Config, ?DEFAULT_HEADERS, Path).
+delete(Config, Headers, Path) ->
     ConnPid = gun_open(Config),
-    Ref = gun:delete(ConnPid, Path, ?HEADERS),
+    Ref = gun:delete(ConnPid, Path, Headers),
     {response, nofin, Code, _Headers} = gun:await(ConnPid, Ref),
     {ok, Body} = gun:await_body(ConnPid, Ref),
     {Code, binary_to_term(Body)}.

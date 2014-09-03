@@ -180,6 +180,8 @@ apply_handler(Req, Data,
     case Result of
         {ok, Reply, Req2} ->
             encode_reply(Req2, 200, Reply, State);
+        {ok, Code, Reply, Req2} ->
+            encode_reply(Req2, Code, Reply, State);
         {halt, _Req2} = Halt ->
             Halt;
         {error, Reason, Req2} ->
@@ -202,6 +204,8 @@ apply_handler(Req,
     case Result of
         {ok, Data, Req2} ->
             encode_reply(Req2, 200, Data, State);
+        {ok, Code, Reply, Req2} ->
+            encode_reply(Req2, Code, Reply, State);
         {halt, _Req2} = Halt ->
             Halt;
         {error, Reason, Req2} ->
@@ -274,6 +278,7 @@ reply(Req, Code, EncodedData, _State) ->
 reply(undefined, Req) ->
     reply(500, Req);
 reply(Code, Req) ->
+    ct:pal("Code: ~p\n", [Code]),
     {ok, Req2} = cowboy_req:reply(Code, Req),
     {halt, Req2}.
 
