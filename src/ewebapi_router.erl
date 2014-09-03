@@ -72,7 +72,8 @@ content_types_provided(Req, #state{api=#ewebapi_router{ctp=Ctps}}=State,
 content_types_provided(Req, Ctps, State, Next) ->
     case cowboy_req:parse_header(<<"accept">>, Req) of
         {error, badarg} ->
-            flow_error(Req, 400, bad_accept_header, State);
+            State2 = State#state{ctp=unreachable},
+            default_error_handler(Req, 400, bad_accept_header, State2);
         {ok, undefined, Req2} ->
             Ctp = hd(Ctps),
             State2 = State#state{ctp=Ctp},
@@ -242,13 +243,11 @@ default_error_handler(
         {halt, _Req2} = Halt ->
             Halt;
         {unhandled, Req2} ->
-            {ok, Req3} = cowboy_req:reply(Code, Req2),
-            {halt, Req3}
+            reply(Code, Req2)
     end.
 
 terminate_error(Req, Code, _Reason, #state{ctp=unreachable}) ->
-    {ok, Req2} = cowboy_req:reply(Code, Req),
-    {halt, Req2};
+    reply(Code, Req);
 terminate_error(Req, Code, Reason, #state{ctp=undefined}=State) ->
     Next =
         fun(Req2, State2) ->
@@ -259,7 +258,6 @@ terminate_error(Req, Code, Reason, State) ->
     encode_reply(Req, Code, Reason, State).
 
 reply(Req, Code, EncodedData, _State) ->
-    Code2 = case Code of undefined -> 500; _ -> Code end,
     Req2 =
         case EncodedData of
             {stream, StreamFun} ->
@@ -271,10 +269,11 @@ reply(Req, Code, EncodedData, _State) ->
             _Contents ->
                 cowboy_req:set_resp_body(EncodedData, Req)
         end,
-    {ok, Req3} = cowboy_req:reply(Code2, Req2),
-    {halt, Req3}.
+    reply(Code, Req2).
 
-flow_error(Req, Code, _Reason, _State) ->
+reply(undefined, Req) ->
+    reply(500, Req);
+reply(Code, Req) ->
     {ok, Req2} = cowboy_req:reply(Code, Req),
     {halt, Req2}.
 
