@@ -30,12 +30,18 @@ execute(Req, Env,
     {ok, Path2} = ewebapi_http_utils:split_path(Path),
     Len = length(Prefix),
     State = #state{api = Api},
-    case catch lists:split(Len, Path2) of
-        {Prefix, RestPath} ->
-            match(Req2, RestPath, ResourcesProplist, State);
-        _ ->
-            {ok, Req2, Env}
+    try
+        case catch lists:split(Len, Path2) of
+            {Prefix, RestPath} ->
+                match(Req2, RestPath, ResourcesProplist, State);
+            _ ->
+                {ok, Req2, Env}
+        end
+    catch E:R ->
+            reply(500, Req),
+            erlang:raise(E, R, erlang:get_stacktrace())
     end.
+
 
 %% =============================================================================
 %%% Flow control
