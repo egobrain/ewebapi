@@ -11,6 +11,5 @@
     stdlib,
     cowboy
    ]},
-  {mod, { ewebapi_app, []}},
   {env, []}
  ]}.
