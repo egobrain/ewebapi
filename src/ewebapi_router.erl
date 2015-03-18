@@ -39,6 +39,7 @@ execute(Req, Env,
         end
     catch E:R ->
             reply(500, Req),
+            io:format("~p,~p,~p\n", [E, R, erlang:get_stacktrace()]),
             erlang:raise(E, R, erlang:get_stacktrace())
     end.
 
@@ -322,25 +323,27 @@ match_(#resource{
             match_(SubResource, Rest, [Resource|Acc]);
         false ->
             %% Case path is last search in verbs
+            SearchInId =
+                fun() ->
+                    %% Try id resource
+                    case IsId =:= false andalso
+                        IdResource =/= undefined of
+                        true ->
+                            IdResource2 = IdResource#resource{id=Path},
+                            match_(IdResource2, Rest,
+                                   [Resource|Acc]);
+                        false ->
+                            {error, nomatch}
+                    end
+                end,
             case Rest of
                 [] ->
                     case lists:keyfind(Path, 1, VerbsProplist) of
                         {_, Methods} ->
                             {ok, {Methods, [Resource|Acc]}};
-                        false ->
-                            %% Try id resource
-                            case IsId =:= false andalso
-                                IdResource =/= undefined of
-                                true ->
-                                    IdResource2 = IdResource#resource{id=Path},
-                                    match_(IdResource2, Rest,
-                                           [Resource|Acc]);
-                                false ->
-                                    {error, nomatch}
-                            end
+                        false -> SearchInId()
                     end;
-                _ ->
-                    {error, nomatch}
+                _ -> SearchInId()
             end
     end.
 
