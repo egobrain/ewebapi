@@ -18,11 +18,9 @@
 -include("router.hrl").
 
 -type resource() :: #resource{}.
--type methods() :: #methods{}.
 
 -export_type([
-              resource/0,
-              methods/0
+              resource/0
              ]).
 
 -record(state, {
@@ -230,10 +228,10 @@ resource_opt({id, Opts}, #resource{is_id=false} = Resource) ->
 resource_opt({method, Method, Fun}, #resource{methods=Methods} = Resource) ->
     Clauses =
         [
-         {<<"GET">>, idinc(2, Resource), #methods.get},
-         {<<"PUT">>, idinc(3, Resource), #methods.put},
-         {<<"POST">>, idinc(3, Resource), #methods.post},
-         {<<"DELETE">>, idinc(2, Resource), #methods.delete}
+         {<<"GET">>, idinc(2, Resource)},
+         {<<"PUT">>, idinc(3, Resource)},
+         {<<"POST">>, idinc(3, Resource)},
+         {<<"DELETE">>, idinc(2, Resource)}
         ],
     case apply_method(Method, Fun, Clauses, Methods) of
         {ok, Methods2} ->
@@ -243,21 +241,17 @@ resource_opt({method, Method, Fun}, #resource{methods=Methods} = Resource) ->
             {error, {{method, Method}, Reason}}
     end;
 resource_opt({verb, Name, Method, Fun}, #resource{verbs=Verbs} = Resource) ->
-    {VerbMethods, Verbs2} =
-        case lists:keytake(Name, 1, Verbs) of
-            {value, {_, M}, Vs} -> {M, Vs};
-            false -> {#methods{}, Verbs}
-        end,
+    VerbMethods = maps:get(Name, Verbs, #{}),
     Clauses =
         [
-         {<<"GET">>, idinc(2, Resource), #methods.get},
-         {<<"PUT">>, idinc(3, Resource), #methods.put},
-         {<<"POST">>, idinc(3, Resource), #methods.post},
-         {<<"DELETE">>, idinc(2, Resource), #methods.delete}
+         {<<"GET">>, idinc(2, Resource)},
+         {<<"PUT">>, idinc(3, Resource)},
+         {<<"POST">>, idinc(3, Resource)},
+         {<<"DELETE">>, idinc(2, Resource)}
         ],
     case apply_method(Method, Fun, Clauses, VerbMethods) of
         {ok, VerbMethods2} ->
-            Resource2 = Resource#resource{verbs=[{Name, VerbMethods2}|Verbs2]},
+            Resource2 = Resource#resource{verbs=maps:put(Name, VerbMethods2, Verbs)},
             {ok, Resource2};
         {error, Reason} ->
             {error, {{method, Method}, Reason}}
@@ -302,12 +296,12 @@ apply_method(M, F, [Clause|Rest], Resource) ->
         next -> apply_method(M, F, Rest, Resource)
     end.
 
-apply_method_(M, Fun, {M, Arity, Pos}, Methods) ->
+apply_method_(M, Fun, {M, Arity}, Methods) ->
     case is_function(Fun, Arity) of
         true ->
-            case element(Pos, Methods) of
-                undefined ->
-                    Methods2 = setelement(Pos, Methods, Fun),
+            case maps:find(M, Methods) of
+                error ->
+                    Methods2 = maps:put(M, Fun, Methods),
                     {ok, Methods2};
                 _ ->
                     {error, already_defineded}
