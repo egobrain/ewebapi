@@ -39,6 +39,7 @@ execute(Req, Env,
         end
     catch E:R ->
             reply(500, Req),
+            io:format("~p,~p,~p\n", [E, R, erlang:get_stacktrace()]),
             erlang:raise(E, R, erlang:get_stacktrace())
     end.
 
@@ -58,12 +59,12 @@ match(Req, RestPath, ResourcesProplist, State) ->
 
 choose_handler(Req, Methods, State) ->
     {Method, Req2} = cowboy_req:method(Req),
-    case get_method_handler(Method, Methods) of
+    case maps:find(Method, Methods) of
         {ok, Handler} ->
             State2 = State#state{handler=Handler},
             content_types_provided(Req2, State2, fun content_types_accepted/2);
-        {error, undefined} ->
-            AllowedMethods = methods_avaible(Methods),
+        error ->
+            AllowedMethods = maps:keys(Methods),
             Req3 = cowboy_req:set_resp_header(<<"allow">>, AllowedMethods, Req2),
             default_error_handler(Req3, 405, method_not_avaible, State)
     end.
@@ -117,6 +118,7 @@ content_types_accepted(Req, State) ->
 content_types_accepted_(Req, #state{resources=[#resource{cta=Ctas}|_]}=State) ->
     case cowboy_req:parse_header(<<"content-type">>, Req) of
         {ok, ContentType, Req2} ->
+            io:format("~p of ~p\n", [ContentType, Ctas]),
             case ewebapi_http_utils:choose_content_type(ContentType, Ctas) of
                 {ok, Cta} ->
                     State2 = State#state{cta=Cta},
@@ -312,7 +314,7 @@ match_(#resource{methods=Methods}=Resource, [], Acc) ->
     {ok, {Methods, [Resource|Acc]}};
 match_(#resource{
           sub_resources=SubResourcesProplist,
-          verbs=VerbsProplist,
+          verbs=Verbs,
           id=IdResource,
           is_id=IsId
          } = Resource, [Path|Rest], Acc) ->
@@ -322,55 +324,26 @@ match_(#resource{
             match_(SubResource, Rest, [Resource|Acc]);
         false ->
             %% Case path is last search in verbs
+            SearchInId =
+                fun() ->
+                    %% Try id resource
+                    case IsId =:= false andalso
+                        IdResource =/= undefined of
+                        true ->
+                            IdResource2 = IdResource#resource{id=Path},
+                            match_(IdResource2, Rest,
+                                   [Resource|Acc]);
+                        false ->
+                            {error, nomatch}
+                    end
+                end,
             case Rest of
                 [] ->
-                    case lists:keyfind(Path, 1, VerbsProplist) of
-                        {_, Methods} ->
+                    case maps:find(Path, Verbs) of
+                        {ok, Methods} ->
                             {ok, {Methods, [Resource|Acc]}};
-                        false ->
-                            %% Try id resource
-                            case IsId =:= false andalso
-                                IdResource =/= undefined of
-                                true ->
-                                    IdResource2 = IdResource#resource{id=Path},
-                                    match_(IdResource2, Rest,
-                                           [Resource|Acc]);
-                                false ->
-                                    {error, nomatch}
-                            end
+                        error -> SearchInId()
                     end;
-                _ ->
-                    {error, nomatch}
+                _ -> SearchInId()
             end
-    end.
-
--spec methods_avaible(ewebapi:methods()) -> [binary()].
-methods_avaible(Methods) ->
-    [M ||
-        {M, P} <-
-            [
-             {<<"GET">>, #methods.get},
-             {<<"PUT">>, #methods.put},
-             {<<"POST">>, #methods.post},
-             {<<"DELETE">>, #methods.delete}
-            ],
-        element(P, Methods) =/= undefined
-    ].
-
--spec get_method_handler(binary(), ewebapi:methods()) ->
-                                {ok, function()} | {error, undefined}.
-get_method_handler(Method, Methods) ->
-    Result =
-        case Method of
-            <<"GET">> -> Methods#methods.get;
-            <<"PUT">> -> Methods#methods.put;
-            <<"POST">> -> Methods#methods.post;
-            <<"DELETE">> -> Methods#methods.delete;
-            _ -> undefined
-        end,
-    case Result of
-        undefined ->
-            {error, undefined};
-        Fun ->
-            {ok, Fun}
     end.
