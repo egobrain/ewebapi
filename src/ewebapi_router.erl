@@ -39,7 +39,6 @@ execute(Req, Env,
         end
     catch E:R ->
             reply(500, Req),
-            io:format("~p,~p,~p\n", [E, R, erlang:get_stacktrace()]),
             erlang:raise(E, R, erlang:get_stacktrace())
     end.
 
@@ -118,7 +117,6 @@ content_types_accepted(Req, State) ->
 content_types_accepted_(Req, #state{resources=[#resource{cta=Ctas}|_]}=State) ->
     case cowboy_req:parse_header(<<"content-type">>, Req) of
         {ok, ContentType, Req2} ->
-            io:format("~p of ~p\n", [ContentType, Ctas]),
             case ewebapi_http_utils:choose_content_type(ContentType, Ctas) of
                 {ok, Cta} ->
                     State2 = State#state{cta=Cta},
