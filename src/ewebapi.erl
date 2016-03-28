@@ -231,7 +231,8 @@ resource_opt({method, Method, Fun}, #resource{methods=Methods} = Resource) ->
          {<<"GET">>, idinc(2, Resource)},
          {<<"PUT">>, idinc(3, Resource)},
          {<<"POST">>, idinc(3, Resource)},
-         {<<"DELETE">>, idinc(2, Resource)}
+         {<<"DELETE">>, idinc(2, Resource)},
+         {<<"OPTIONS">>, idinc(2, Resource)}
         ],
     case apply_method(Method, Fun, Clauses, Methods) of
         {ok, Methods2} ->
@@ -247,7 +248,8 @@ resource_opt({verb, Name, Method, Fun}, #resource{verbs=Verbs} = Resource) ->
          {<<"GET">>, idinc(2, Resource)},
          {<<"PUT">>, idinc(3, Resource)},
          {<<"POST">>, idinc(3, Resource)},
-         {<<"DELETE">>, idinc(2, Resource)}
+         {<<"DELETE">>, idinc(2, Resource)},
+         {<<"OPTIONS">>, idinc(2, Resource)}
         ],
     case apply_method(Method, Fun, Clauses, VerbMethods) of
         {ok, VerbMethods2} ->
