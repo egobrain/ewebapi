@@ -42,7 +42,6 @@ execute(Req, Env,
             erlang:raise(E, R, erlang:get_stacktrace())
     end.
 
-
 %% =============================================================================
 %%% Flow control
 %% =============================================================================
@@ -53,7 +52,9 @@ match(Req, RestPath, ResourcesProplist, State) ->
             State2 = State#state{resources=Resources},
             choose_handler(Req, Methods, State2);
         {error, nomatch} ->
-            default_error_handler(Req, 404, wrong_path, State)
+            default_error_handler(Req, 404, wrong_path, State);
+        {error, Resource, Reason} ->
+            resource_error_handler(Req, 404, Reason, Resource, State)
     end.
 
 choose_handler(Req, Methods, State) ->
@@ -325,13 +326,16 @@ match_(#resource{
             SearchInId =
                 fun() ->
                     %% Try id resource
-                    case IsId =:= false andalso
-                        IdResource =/= undefined of
-                        true ->
-                            IdResource2 = IdResource#resource{id=Path},
-                            match_(IdResource2, Rest,
-                                   [Resource|Acc]);
-                        false ->
+                    case IsId =:= false andalso IdResource of
+                        #resource{converter=Converter} ->
+                            case maybe_apply(Converter, Path) of
+                                {ok, CovertedPath} ->
+                                    IdResource2 = IdResource#resource{id=CovertedPath},
+                                    match_(IdResource2, Rest, [Resource|Acc]);
+                                {error, Reason} ->
+                                    {error, IdResource, Reason}
+                            end;
+                        _ ->
                             {error, nomatch}
                     end
                 end,
@@ -345,3 +349,6 @@ match_(#resource{
                 _ -> SearchInId()
             end
     end.
+
+maybe_apply(undefined, Data) -> {ok, Data};
+maybe_apply(Converter, Data) -> Converter(Data).

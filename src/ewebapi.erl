@@ -217,8 +217,10 @@ resource_opt({hop, Fun}, Resource)  ->
         false ->
             {error, {hop, invalid_function}}
     end;
-resource_opt({id, Opts}, #resource{is_id=false} = Resource) ->
-    case fold_resource_opts(#resource{is_id=true}, Opts) of
+resource_opt({id, Opts}, Resource) ->
+    resource_opt({id, undefined, Opts}, Resource);
+resource_opt({id, Converter, Opts}, #resource{is_id=false}=Resource) ->
+    case fold_resource_opts(#resource{is_id=true, converter=Converter}, Opts) of
         {ok, IdResource} ->
             Resource2 = Resource#resource{id=IdResource},
             {ok, Resource2};

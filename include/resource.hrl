@@ -1,6 +1,7 @@
 -record(resource, {
           is_id,
           id,
+          converter,
           methods = #{},
           verbs = #{},
           sub_resources = [],
